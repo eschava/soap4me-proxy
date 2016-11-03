@@ -407,7 +407,7 @@ class SoapApi(object):
                 [ 0, -1, -3, -4],  # rus
             ]
 
-        config_translate_index = 2 * self.config.language * 2 + self.config.subtitles_language
+        config_translate_index = 2 * self.config.language + self.config.subtitles_language
         translate_order = translate_matrix[translate][config_translate_index]
         quality_order = \
             (quality - self.config.quality) \
