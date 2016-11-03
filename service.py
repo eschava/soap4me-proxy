@@ -25,6 +25,7 @@ import re
 __addon__    = xbmcaddon.Addon()
 ADDONVERSION = __addon__.getAddonInfo('version')
 ADDONNAME    = __addon__.getAddonInfo('name')
+ADDONID      = __addon__.getAddonInfo('id')
 ADDONICON    = xbmc.translatePath(__addon__.getAddonInfo('icon'))
 ADDONPROFILE = xbmc.translatePath(__addon__.getAddonInfo('profile'))
 
@@ -170,7 +171,7 @@ class SoapHttpClient(SoapCookies):
         return urllib.urlencode(params)
 
     def _request(self, url, params=None):
-        xbmc.log('{0}: REQUEST: {1} {2}'.format(ADDONNAME, url, params))
+        xbmc.log('{0}: REQUEST: {1} {2}'.format(ADDONID, url, params))
         self._cookies_init()
 
         req = urllib2.Request(self.HOST + url)
@@ -230,7 +231,6 @@ to_int = lambda s: int(s) if s != '' else 0
 class KodiConfig(object):
     @classmethod
     def soap_get_auth(cls):
-
         return {
             'token': __addon__.getSetting('_token'),
             'token_sid': __addon__.getSetting('_token_sid'),
@@ -283,6 +283,13 @@ class KodiConfig(object):
     @classmethod
     def get_web_port(cls):
         return to_int(__addon__.getSetting('port'))
+
+
+class SoapConfig(object):
+    def __init__(self):
+        self.language = to_int(__addon__.getSetting('language'))  # 0 rus, 1 orig
+        self.subtitles_language = to_int(__addon__.getSetting('subtitles_language'))  # 0 rus, 1 orig
+        self.quality = to_int(__addon__.getSetting('quality'))  # 0 SD, 1 720p, 2 FullHD, 3 2K, 4 4K
 
 
 class SoapAuth(object):
@@ -359,7 +366,7 @@ class SoapApi(object):
     def __init__(self):
         self.client = SoapHttpClient()
         self.auth = SoapAuth(self.client)
-        #self.config = SoapConfig()
+        self.config = SoapConfig()
 
         self.auth.auth()
 
@@ -379,12 +386,35 @@ class SoapApi(object):
         data = data['episodes']
         return map(lambda row: self.get_episode(row), data)
 
-    @staticmethod
-    def get_episode(row):
-        file = row['files'][0]  # TODO: search for the best file
-        return {'season': row['season'], 'episode': row['episode'], 'id': file['eid'], 'hash': file['hash']}
+    def get_episode(self, row):
+        f = self.get_best_file(row['files'])
+        return {'season': row['season'], 'episode': row['episode'], 'id': f['eid'], 'hash': f['hash']}
+
+    def get_best_file(self, files):
+        return max(files, key=self.get_file_order)
+
+    def get_file_order(self, f):
+        translate = int(f['translate']) - 1  # from 0
+        quality = int(f['quality']) - 1  # from 0
+
+        translate_matrix = \
+            [
+                [-4, -3, -1,  0],  # eng
+                [-1, -1, -3, -2],  # rus with eng subs
+                [-2, -3, -1, -1],  # eng with rus subs
+                [ 0, -1, -3, -4],  # rus
+            ]
+
+        config_translate_index = 2 * self.config.language * 2 + self.config.subtitles_language
+        translate_order = translate_matrix[translate][config_translate_index]
+        quality_order = \
+            (quality - self.config.quality) \
+            if (quality <= self.config.quality) \
+            else (self.config.quality - quality - 10)
+        return 100 * translate_order + quality_order  # translation has priority over quality
 
     def get_episode_url(self, sid, eid, ehash):
+        # TODO: warn if quality is bigger than configured
         myhash = hashlib.md5(
                     str(self.client.token) +
                     str(eid) +
@@ -405,13 +435,13 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         # Parse query data & params to find out what was passed
-        xbmc.log('%s: Serve %s' % (ADDONNAME, self.path))
+        xbmc.log('%s: Serve %s' % (ADDONID, self.path))
         parsed_params = urlparse.urlparse(self.path)
         query_parsed = urlparse.parse_qs(parsed_params.query)
         path = urllib.unquote(parsed_params.path)
 
         if path == '/':
-            xbmc.log('%s: Listing shows' % ADDONNAME)
+            xbmc.log('%s: Listing shows' % ADDONID)
             shows = self.server.api.my_shows()
 
             self.out_folders(shows,
@@ -421,7 +451,7 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
             show = self.match.group(1)
             sid = query_parsed['id'][0]
 
-            xbmc.log('%s: Listing episodes of \'%s\'' % (ADDONNAME, show))
+            xbmc.log('%s: Listing episodes of \'%s\'' % (ADDONID, show))
             episodes = self.server.api.episodes(sid)
 
             self.out_files(episodes,
@@ -435,10 +465,10 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
             eid = query_parsed['id'][0]
             ehash = query_parsed['hash'][0]
 
-            xbmc.log('%s: Requested episode %s from season %s of \'%s\'' % (ADDONNAME, episode, season, show))
+            xbmc.log('%s: Requested episode %s from season %s of \'%s\'' % (ADDONID, episode, season, show))
             url = self.server.api.get_episode_url(sid, eid, ehash)
 
-            xbmc.log("%s: Redirect to '%s'" % (ADDONNAME, url))
+            xbmc.log("%s: Redirect to '%s'" % (ADDONID, url))
             self.send_response(301)
             self.send_header('Location', url)
             self.end_headers()
@@ -481,5 +511,5 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    xbmc.log('%s: Version %s started' % (ADDONNAME, ADDONVERSION))
+    xbmc.log('%s: Version %s started' % (ADDONID, ADDONVERSION))
     Main()
