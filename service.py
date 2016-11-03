@@ -207,11 +207,13 @@ class SoapHttpClient(SoapCookies):
         if use_cache:
             text = self.cache.get(url)
 
-        if text is None or not text :
+        if text is None or not text:
             text = self._request(url, params)
 
             if use_cache:
                 self.cache.set(url, text)
+        else:
+            xbmc.log('%s: Url \'%s\' present in cache' % (ADDONID, url))
 
         try:
             return json.loads(text)
@@ -378,11 +380,11 @@ class SoapApi(object):
         KodiConfig.message_till_days()
 
     def my_shows(self):
-        data = self.client.request(self.MY_SHOWS_URL, use_cache=False)
+        data = self.client.request(self.MY_SHOWS_URL, use_cache=True)
         return map(lambda row: {'name': row['title'], 'id': row['sid']}, data)
 
     def episodes(self, sid):
-        data = self.client.request(self.EPISODES_URL.format(sid), use_cache=False)
+        data = self.client.request(self.EPISODES_URL.format(sid), use_cache=True)
         data = data['episodes']
         return map(lambda row: self.get_episode(row), data)
 
@@ -435,7 +437,7 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         # Parse query data & params to find out what was passed
-        xbmc.log('%s: Serve %s' % (ADDONID, self.path))
+        xbmc.log('%s: Serve \'%s\'' % (ADDONID, self.path))
         parsed_params = urlparse.urlparse(self.path)
         query_parsed = urlparse.parse_qs(parsed_params.query)
         path = urllib.unquote(parsed_params.path)
@@ -477,8 +479,8 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
             self.end_headers()
             return
 
-    def matches(self, regexp, str):
-        self.match = re.match(regexp, str, re.M | re.I)
+    def matches(self, regexp, s):
+        self.match = re.match(regexp, s, re.M | re.I)
         return self.match is not None
 
     def out_folders(self, folders, name_lambda, url_lambda):
