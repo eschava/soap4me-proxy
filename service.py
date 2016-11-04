@@ -14,6 +14,7 @@ import gzip
 import threading
 import time
 import hashlib
+from itertools import ifilter
 
 import SimpleHTTPServer
 import SocketServer
@@ -83,7 +84,7 @@ class KodiMonitor(xbmc.Monitor):
     def onScanFinished(self, library):
         xbmc.Monitor.onScanFinished(self, library)
         xbmc.log('%s: Library scan \'%s\' finished' % (ADDONID, library))
-        self.watched_status.sync_status()
+        self.watched_status.sync_status()  # TODO: do in new thread
 
     def onNotification(self, sender, method, data):
         xbmc.Monitor.onNotification(self, sender, method, data)
@@ -92,9 +93,9 @@ class KodiMonitor(xbmc.Monitor):
         if method == 'VideoLibrary.OnUpdate':
             params = json.loads(data)
             item_type = params['item']['type']
-            if item_type == 'episode':
+            if item_type == 'episode' and 'playcount' in params:
                 item_id = params['item']['id']
-                playcount = params.get('playcount', 0)
+                playcount = params['playcount']
                 self.watched_status.update_server_status(item_id, playcount > 0)
         elif method == 'Player.OnStop':
             params = json.loads(data)
@@ -147,9 +148,10 @@ class WatchedStatus(object):
         episode_key = season + '/' + episode
         if show_watched_status.get(episode_key) != watched:
             eid = self.get_soap_episode_id(episode_details)
-            xbmc.log('%s: Updating remote watched status of show \'%s\' season %s episode %s to %s' % (ADDONID, imdb, season, episode, watched))
-            self.soap_api.mark_watched(eid, watched)
-            show_watched_status[episode_key] = watched
+            if eid is not None:
+                xbmc.log('%s: Updating remote watched status of show \'%s\' season %s episode %s to %s' % (ADDONID, imdb, season, episode, watched))
+                self.soap_api.mark_watched(eid, watched)
+                show_watched_status[episode_key] = watched
 
     def sync_status(self):
         for show in KodiApi.get_shows():
@@ -165,16 +167,14 @@ class WatchedStatus(object):
                     episode_key = season + '/' + episode
                     watched = show_watched_status.get(episode_key)
                     if kodi_watched != watched:
-                        xbmc.log('%s: Updating locale watched status of show \'%s\' season %s episode %s to %s' % (ADDONID, imdb, season, episode, watched))
+                        xbmc.log('%s: Updating local watched status of show \'%s\' season %s episode %s to %s' % (ADDONID, imdb, season, episode, watched))
                         episode_id = e['episodeid']
                         KodiApi.set_watched(episode_id, watched)
 
     @staticmethod
     def get_soap_episode_id(episode_details):
         url = episode_details['file']
-        parsed_params = urlparse.urlparse(url)
-        query_parsed = urlparse.parse_qs(parsed_params.query)
-        return query_parsed['id'][0]
+        return WebHandler.get_episode_id(url)
 
 
 class SoapCache(object):
@@ -491,7 +491,7 @@ class SoapApi(object):
 
     def my_shows(self):
         data = self.client.request(self.MY_SHOWS_URL, use_cache=True)
-        # TODO: tvdb_id is used as IMDB because Kodi uses TVDB internaly for imdbnumber key
+        # TODO: tvdb_id is used as IMDB because Kodi uses TVDB internally for imdbnumber key
         return map(lambda row: {'name': row['title'], 'id': row['sid'], 'IMDB': row['tvdb_id'].replace('tt', '')}, data)
 
     def episodes(self, sid, imdb):
@@ -547,6 +547,7 @@ class SoapApi(object):
         return result['stream']
 
     def mark_watched(self, eid, watched):
+        # TODO: clean cache for show
         url = self.MARK_WATCHED if watched else self.MARK_UNWATCHED
         self.client.request(url.format(eid=eid), {'eid': eid})
 
@@ -626,6 +627,10 @@ class KodiApi(object):
         xbmc.executeJSONRPC(postdata)
 
 
+# NOTE: standard ?param=value&param2=value2... notation is not used for url parameters because of
+# issue with endless directory scanning by Kodi
+# so for folder is used only show name
+# and for file name custom prefix containing all required IDs is used
 class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
     match = None
 
@@ -633,34 +638,35 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         # Parse query data & params to find out what was passed
         xbmc.log('%s: Serve \'%s\'' % (ADDONID, self.path))
         parsed_params = urlparse.urlparse(self.path)
-        query_parsed = urlparse.parse_qs(parsed_params.query)
         path = urllib.unquote(parsed_params.path)
 
         if path == '/':
             xbmc.log('%s: Listing shows' % ADDONID)
             shows = self.server.api.my_shows()
 
-            self.out_folders(shows,
-                             lambda s: s['name'] + '/',
-                             lambda s: urllib.quote(s['name']) + '/?id=' + s['id'] + '&IMDB=' + s['IMDB'])
+            self.out_folders(map(lambda s: s['name'], shows))
         elif self.matches('^/(.*)/$', path):
             show = self.match.group(1)
-            sid = query_parsed['id'][0]
-            imdb = query_parsed['IMDB'][0]
+            show_details = self.find_show(show)
+            if show_details is not None:
+                sid = show_details['id']
+                imdb = show_details['IMDB']
 
-            xbmc.log('%s: Listing episodes of \'%s\'' % (ADDONID, show))
-            episodes = self.server.api.episodes(sid, imdb)
+                xbmc.log('%s: Listing episodes of \'%s\'' % (ADDONID, show))
+                episodes = self.server.api.episodes(sid, imdb)
 
-            self.out_files(episodes,
-                             lambda e: 'S' + e['season'] + 'E' + e['episode'] + '.avi',
-                             lambda e: 'S' + e['season'] + 'E' + e['episode'] + '.avi?sid=' + sid + '&id=' + e['id'] + '&hash=' + e['hash'])
-        elif self.matches('^/(.*)/S(\d+)E(\d+).avi$', path):
+                # format parsable by TVDB scraper
+                name_lambda = lambda e: sid + '_' + e['id'] + '_' + e['hash'] + '_S' + e['season'] + 'E' + e['episode'] + '.avi'
+                self.out_files(map(name_lambda, episodes))
+            else:
+                xbmc.log('%s: ERROR: Show \'%s\' not found' % (ADDONID, show))
+        elif self.matches('^/(.*)/(\d+)_(\d+)_([0-9a-f]+)_S(\d+)E(\d+).avi$', path):
             show = self.match.group(1)
-            season = self.match.group(2)
-            episode = self.match.group(3)
-            sid = query_parsed['sid'][0]
-            eid = query_parsed['id'][0]
-            ehash = query_parsed['hash'][0]
+            sid = self.match.group(2)
+            eid = self.match.group(3)
+            ehash = self.match.group(4)
+            season = self.match.group(5)
+            episode = self.match.group(6)
 
             xbmc.log('%s: Requested episode %s from season %s of \'%s\'' % (ADDONID, episode, season, show))
             url = self.server.api.get_episode_url(sid, eid, ehash)
@@ -678,11 +684,29 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         self.match = re.match(regexp, s, re.M | re.I)
         return self.match is not None
 
-    def out_folders(self, folders, name_lambda, url_lambda):
-        self.out_elements(map(lambda f: "   <tr><td valign=\"top\"><img src=\"/icons/folder.gif\" alt=\"[DIR]\"></td><td><a href=\"%s\">%s</a></td><td align=\"right\">2016-11-01 23:18</td><td align=\"right\">  - </td><td>&nbsp;</td></tr>\n" % (url_lambda(f), name_lambda(f)), folders))
+    @staticmethod
+    def get_episode_id(url):
+        parsed_params = urlparse.urlparse(url)
+        file_name = os.path.basename(parsed_params.path)
+        return file_name.split('_')[1]
 
-    def out_files(self, files, name_lambda, url_lambda):
-        self.out_elements(map(lambda f: "   <tr><td valign=\"top\"><img src=\"/icons/movie.gif\" alt=\"[VID]\"></td><td><a href=\"%s\">%s</a></td><td align=\"right\">2016-11-01 23:08</td><td align=\"right\"> 0 </td><td>&nbsp;</td></tr>\n" % (url_lambda(f), name_lambda(f)), files))
+    def out_folders(self, folders):
+        self.out_elements(map(lambda f: "<tr>"
+                                        "  <td valign=\"top\"><img src=\"/icons/folder.gif\" alt=\"[DIR]\"></td>"
+                                        "  <td><a href=\"%s/\">%s</a></td>"
+                                        "  <td align=\"right\">2016-11-01 23:18</td>"
+                                        "  <td align=\"right\">  - </td>"
+                                        "  <td>&nbsp;</td>"
+                                        "</tr>\n" % (urllib.quote(f), f), folders))
+
+    def out_files(self, files):
+        self.out_elements(map(lambda f: "<tr> "
+                                        "  <td valign=\"top\"><img src=\"/icons/movie.gif\" alt=\"[VID]\"></td>"
+                                        "  <td><a href=\"%s\">%s</a></td>"
+                                        "  <td align=\"right\">2016-11-01 23:08</td>"
+                                        "  <td align=\"right\"> 0 </td>"
+                                        "  <td>&nbsp;</td>"
+                                        "</tr>\n" % (f, f), files))
 
     def out_elements(self, elements):
         self.send_response(200)
@@ -705,6 +729,10 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         self.wfile.write("</table>\n")
         self.wfile.write("</body></html>\n")
         self.wfile.close()
+
+    def find_show(self, show):
+        shows = self.server.api.my_shows()  # should be cached
+        return next(ifilter(lambda s: show == s['name'], shows), None)
 
 
 if __name__ == "__main__":
