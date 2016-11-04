@@ -563,7 +563,6 @@ class KodiApi(object):
         json_query = xbmc.executeJSONRPC(postdata)
         json_query = unicode(json_query, 'utf-8', errors='ignore')
         json_query = json.loads(json_query)['result']['tvshows']
-        xbmc.log(repr(json_query))
         return json_query
 
     @staticmethod
@@ -578,7 +577,6 @@ class KodiApi(object):
         json_query = xbmc.executeJSONRPC(postdata)
         json_query = unicode(json_query, 'utf-8', errors='ignore')
         json_query = json.loads(json_query)['result']['tvshowdetails']
-        xbmc.log(repr(json_query))
         return json_query
 
     @staticmethod
