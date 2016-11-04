@@ -49,23 +49,76 @@ soappath = os.path.join(ADDONPROFILE, "soap4me-proxy")
 
 class Main:
     def __init__(self):
-        api = SoapApi()
+        watched_status = WatchedStatus()
+
+        api = SoapApi(watched_status)
         api.main()
 
         httpd = SocketServer.TCPServer(("", KodiConfig.get_web_port()), WebHandler)
         httpd.api = api
-        kodi_waiter = threading.Thread(target=self.kodi_waiter_thread, args=(httpd,))
+        kodi_waiter = threading.Thread(target=self.kodi_waiter_thread, args=(httpd, watched_status,))
         kodi_waiter.start()
         httpd.serve_forever()
 
     @staticmethod
-    def kodi_waiter_thread(httpd):
-        monitor = xbmc.Monitor()
+    def kodi_waiter_thread(httpd, watched_status):
+        monitor = KodiMonitor(watched_status)
         while not monitor.abortRequested():
             if monitor.waitForAbort(3):
                  break
-        xbmc.log('%s: Exiting' % (ADDONNAME))
+        xbmc.log('%s: Exiting' % (ADDONID))
         httpd.shutdown()
+
+
+# noinspection PyPep8Naming
+class KodiMonitor(xbmc.Monitor):
+    def __init__(self, watched_status):
+        self.watched_status = watched_status
+
+    def onScanStarted(self, library):
+        xbmc.Monitor.onScanStarted(self, library)
+        xbmc.log('%s: Library scan \'%s\' started' % (ADDONID, library))
+
+    def onScanFinished(self, library):
+        xbmc.Monitor.onScanFinished(self, library)
+        xbmc.log('%s: Library scan \'%s\' finished' % (ADDONID, library))
+        self.watched_status.sync_status()
+
+    # def onNotification(self, sender, method, data):
+    #     xbmc.Monitor.onNotification(self, sender, method, data)
+    #     xbmc.log('%s: Notification %s from %s, params: %s' % (ADDONID, method, sender, str(data)))
+
+
+class WatchedStatus(object):
+    watched_status = dict()
+
+    def set_server_status(self, imdb, season, episode, watched):
+        # xbmc.log('%s: Watched status %s/%s/%s/%s' % (ADDONID, imdb, season, episode, watched))
+        show_watched_status = self.watched_status.get(imdb)
+        if show_watched_status is None:
+            show_watched_status = dict()
+            self.watched_status[imdb] = show_watched_status
+
+        episode_key = season + '/' + episode
+        show_watched_status[episode_key] = watched
+
+    def sync_status(self):
+        for show in KodiApi.get_shows():
+            imdb = show['imdbnumber']
+            show_watched_status = self.watched_status.get(imdb)
+
+            if show_watched_status is not None:
+                show_id = show['tvshowid']
+                for e in KodiApi.get_episodes(show_id):
+                    season = str(e['season'])
+                    episode = str(e['episode'])
+                    kodi_watched = e['playcount'] > 0
+                    episode_key = season + '/' + episode
+                    watched = show_watched_status.get(episode_key)
+                    if kodi_watched != watched:
+                        xbmc.log('%s: Updating watched status of show \'%s\' season %s episode %s to %s' % (ADDONID, imdb, season, episode, watched))
+                        episode_id = e['episodeid']
+                        KodiApi.set_watched(episode_id, watched)
 
 
 class SoapCache(object):
@@ -365,10 +418,11 @@ class SoapApi(object):
     # MARK_WATCHED = '/episodes/watch/{eid}/'
     # MARK_UNWATCHED = '/episodes/unwatch/{eid}/'
 
-    def __init__(self):
+    def __init__(self, watched_status):
         self.client = SoapHttpClient()
         self.auth = SoapAuth(self.client)
         self.config = SoapConfig()
+        self.watched_status = watched_status
 
         self.auth.auth()
 
@@ -381,11 +435,16 @@ class SoapApi(object):
 
     def my_shows(self):
         data = self.client.request(self.MY_SHOWS_URL, use_cache=True)
-        return map(lambda row: {'name': row['title'], 'id': row['sid']}, data)
+        # TODO: tvdb_id is used as IMDB because Kodi uses TVDB internaly for imdbnumber key
+        return map(lambda row: {'name': row['title'], 'id': row['sid'], 'IMDB': row['tvdb_id'].replace('tt', '')}, data)
 
-    def episodes(self, sid):
+    def episodes(self, sid, imdb):
         data = self.client.request(self.EPISODES_URL.format(sid), use_cache=True)
         data = data['episodes']
+
+        for e in data:
+            self.watched_status.set_server_status(imdb, e['season'], e['episode'], e['watched'] == 1)
+
         return map(lambda row: self.get_episode(row), data)
 
     def get_episode(self, row):
@@ -432,6 +491,47 @@ class SoapApi(object):
         return result['stream']
 
 
+class KodiApi(object):
+    @staticmethod
+    def get_shows():
+        postdata = json.dumps({"jsonrpc": "2.0",
+                               "id": 1,
+                               'method': 'VideoLibrary.GetTVShows',
+                               "params": {
+                                   "properties": ["imdbnumber"]
+                               }})
+        json_query = xbmc.executeJSONRPC(postdata)
+        json_query = unicode(json_query, 'utf-8', errors='ignore')
+        json_query = json.loads(json_query)['result']['tvshows']
+        xbmc.log(repr(json_query))
+        return json_query
+
+    @staticmethod
+    def get_episodes(show_id):
+        postdata = json.dumps({"jsonrpc": "2.0",
+                               "id": 1,
+                               'method': 'VideoLibrary.GetEpisodes',
+                               "params": {
+                                   'tvshowid': show_id,
+                                   "properties": ["season", "episode", "playcount"]
+                               }})
+        json_query = xbmc.executeJSONRPC(postdata)
+        json_query = unicode(json_query, 'utf-8', errors='ignore')
+        json_query = json.loads(json_query)['result']['episodes']
+        return json_query
+
+    @staticmethod
+    def set_watched(episode_id, watched):
+        postdata = json.dumps({"jsonrpc": "2.0",
+                               "id": 1,
+                               'method': 'VideoLibrary.SetEpisodeDetails',
+                               "params": {
+                                   'episodeid': episode_id,
+                                   'playcount': 1 if watched else 0,
+                               }})
+        xbmc.executeJSONRPC(postdata)
+
+
 class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
     match = None
 
@@ -448,17 +548,18 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
 
             self.out_folders(shows,
                              lambda s: s['name'] + '/',
-                             lambda s: urllib.quote(s['name']) + '/?id=' + s['id'])
+                             lambda s: urllib.quote(s['name']) + '/?id=' + s['id'] + '&IMDB=' + s['IMDB'])
         elif self.matches('^/(.*)/$', path):
             show = self.match.group(1)
             sid = query_parsed['id'][0]
+            imdb = query_parsed['IMDB'][0]
 
             xbmc.log('%s: Listing episodes of \'%s\'' % (ADDONID, show))
-            episodes = self.server.api.episodes(sid)
+            episodes = self.server.api.episodes(sid, imdb)
 
             self.out_files(episodes,
                              lambda e: 'S' + e['season'] + 'E' + e['episode'] + '.avi',
-                             lambda e: 'S' + e['season'] + 'E' + e['episode'] + '.avi?sid=' + sid + '&amp;id=' + e['id'] + '&amp;hash=' + e['hash'])
+                             lambda e: 'S' + e['season'] + 'E' + e['episode'] + '.avi?sid=' + sid + '&id=' + e['id'] + '&hash=' + e['hash'])
         elif self.matches('^/(.*)/S(\d+)E(\d+).avi$', path):
             show = self.match.group(1)
             season = self.match.group(2)
