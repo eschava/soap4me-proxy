@@ -52,6 +52,7 @@ class Main:
         watched_status = WatchedStatus()
 
         api = SoapApi(watched_status)
+        watched_status.soap_api = api
         api.main()
 
         httpd = SocketServer.TCPServer(("", KodiConfig.get_web_port()), WebHandler)
@@ -84,13 +85,40 @@ class KodiMonitor(xbmc.Monitor):
         xbmc.log('%s: Library scan \'%s\' finished' % (ADDONID, library))
         self.watched_status.sync_status()
 
-    # def onNotification(self, sender, method, data):
-    #     xbmc.Monitor.onNotification(self, sender, method, data)
-    #     xbmc.log('%s: Notification %s from %s, params: %s' % (ADDONID, method, sender, str(data)))
+    def onNotification(self, sender, method, data):
+        xbmc.Monitor.onNotification(self, sender, method, data)
+        xbmc.log('%s: Notification %s from %s, params: %s' % (ADDONID, method, sender, str(data)))
+
+        if method == 'VideoLibrary.OnUpdate':
+            params = json.loads(data)
+            item_type = params['item']['type']
+            if item_type == 'episode':
+                item_id = params['item']['id']
+                playcount = params.get('playcount', 0)
+                self.watched_status.update_server_status(item_id, playcount > 0)
+        elif method == 'Player.OnStop':
+            params = json.loads(data)
+            item_type = params['item']['type']
+            if item_type == 'episode':
+                item_id = params['item']['id']
+                end = params['end']
+                if end:
+                    self.watched_status.update_server_status(item_id, True)
+                else:
+                    # resume time is not still updated so need to re-check time later
+                    threading.Timer(3.0, self.onPlayerStopped, args=(item_id, )).start()
+
+    def onPlayerStopped(self, item_id):
+        episode_details = KodiApi.get_episode_details(item_id)
+        position = episode_details['resume']['position']
+        total = episode_details['resume']['total']
+        if total > 0 and position / total > 0.9:
+            self.watched_status.update_server_status(item_id, True)
 
 
 class WatchedStatus(object):
     watched_status = dict()
+    soap_api = None
 
     def set_server_status(self, imdb, season, episode, watched):
         # xbmc.log('%s: Watched status %s/%s/%s/%s' % (ADDONID, imdb, season, episode, watched))
@@ -101,6 +129,27 @@ class WatchedStatus(object):
 
         episode_key = season + '/' + episode
         show_watched_status[episode_key] = watched
+
+    def update_server_status(self, episode_id, watched):
+        episode_details = KodiApi.get_episode_details(episode_id)
+        show_id = episode_details['tvshowid']
+        season = str(episode_details['season'])
+        episode = str(episode_details['episode'])
+
+        show = KodiApi.get_show_details(show_id)
+        imdb = show['imdbnumber']
+
+        show_watched_status = self.watched_status.get(imdb)
+        if show_watched_status is None:
+            show_watched_status = dict()
+            self.watched_status[imdb] = show_watched_status
+
+        episode_key = season + '/' + episode
+        if show_watched_status.get(episode_key) != watched:
+            eid = self.get_soap_episode_id(episode_details)
+            xbmc.log('%s: Updating remote watched status of show \'%s\' season %s episode %s to %s' % (ADDONID, imdb, season, episode, watched))
+            self.soap_api.mark_watched(eid, watched)
+            show_watched_status[episode_key] = watched
 
     def sync_status(self):
         for show in KodiApi.get_shows():
@@ -116,9 +165,16 @@ class WatchedStatus(object):
                     episode_key = season + '/' + episode
                     watched = show_watched_status.get(episode_key)
                     if kodi_watched != watched:
-                        xbmc.log('%s: Updating watched status of show \'%s\' season %s episode %s to %s' % (ADDONID, imdb, season, episode, watched))
+                        xbmc.log('%s: Updating locale watched status of show \'%s\' season %s episode %s to %s' % (ADDONID, imdb, season, episode, watched))
                         episode_id = e['episodeid']
                         KodiApi.set_watched(episode_id, watched)
+
+    @staticmethod
+    def get_soap_episode_id(episode_details):
+        url = episode_details['file']
+        parsed_params = urlparse.urlparse(url)
+        query_parsed = urlparse.parse_qs(parsed_params.query)
+        return query_parsed['id'][0]
 
 
 class SoapCache(object):
@@ -415,8 +471,8 @@ class SoapApi(object):
     #
     PLAY_EPISODES_URL = '/play/episode/{eid}/'
     # SAVE_POSITION_URL = '/play/episode/{eid}/savets/'
-    # MARK_WATCHED = '/episodes/watch/{eid}/'
-    # MARK_UNWATCHED = '/episodes/unwatch/{eid}/'
+    MARK_WATCHED = '/episodes/watch/{eid}/'
+    MARK_UNWATCHED = '/episodes/unwatch/{eid}/'
 
     def __init__(self, watched_status):
         self.client = SoapHttpClient()
@@ -490,6 +546,10 @@ class SoapApi(object):
         result = self.client.request(self.PLAY_EPISODES_URL.format(eid=eid), data)
         return result['stream']
 
+    def mark_watched(self, eid, watched):
+        url = self.MARK_WATCHED if watched else self.MARK_UNWATCHED
+        self.client.request(url.format(eid=eid), {'eid': eid})
+
 
 class KodiApi(object):
     @staticmethod
@@ -507,6 +567,21 @@ class KodiApi(object):
         return json_query
 
     @staticmethod
+    def get_show_details(show_id):
+        postdata = json.dumps({"jsonrpc": "2.0",
+                               "id": 1,
+                               'method': 'VideoLibrary.GetTVShowDetails',
+                               "params": {
+                                   'tvshowid': show_id,
+                                   "properties": ["imdbnumber"]
+                               }})
+        json_query = xbmc.executeJSONRPC(postdata)
+        json_query = unicode(json_query, 'utf-8', errors='ignore')
+        json_query = json.loads(json_query)['result']['tvshowdetails']
+        xbmc.log(repr(json_query))
+        return json_query
+
+    @staticmethod
     def get_episodes(show_id):
         postdata = json.dumps({"jsonrpc": "2.0",
                                "id": 1,
@@ -516,8 +591,29 @@ class KodiApi(object):
                                    "properties": ["season", "episode", "playcount"]
                                }})
         json_query = xbmc.executeJSONRPC(postdata)
+        json_query = json.loads(json_query)
+        if 'error' in json_query:
+            xbmc.log('%s: ERROR: %s' % (ADDONID, json_query['error']['stack']['message']))
+            return None
+        json_query = json_query['result']['episodes']
+        return json_query
+
+    @staticmethod
+    def get_episode_details(episode_id):
+        postdata = json.dumps({"jsonrpc": "2.0",
+                               "id": 1,
+                               'method': 'VideoLibrary.GetEpisodeDetails',
+                               "params": {
+                                   'episodeid': episode_id,
+                                   "properties": ["season", "episode", "tvshowid", "playcount", "file", "resume"]
+                               }})
+        json_query = xbmc.executeJSONRPC(postdata)
         json_query = unicode(json_query, 'utf-8', errors='ignore')
-        json_query = json.loads(json_query)['result']['episodes']
+        json_query = json.loads(json_query)
+        if 'error' in json_query:
+            xbmc.log('%s: ERROR: %s' % (ADDONID, json_query['error']['stack']['message']))
+            return None
+        json_query = json_query['result']['episodedetails']
         return json_query
 
     @staticmethod
