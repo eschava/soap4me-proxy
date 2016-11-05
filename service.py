@@ -150,7 +150,8 @@ class WatchedStatus(object):
             eid = self.get_soap_episode_id(episode_details)
             if eid is not None:
                 xbmc.log('%s: Updating remote watched status of show \'%s\' season %s episode %s to %s' % (ADDONID, imdb, season, episode, watched))
-                self.soap_api.mark_watched(eid, watched)
+                sid = self.get_soap_season_id(episode_details)
+                self.soap_api.mark_watched(sid, eid, watched)
                 show_watched_status[episode_key] = watched
 
     def sync_status(self):
@@ -175,6 +176,11 @@ class WatchedStatus(object):
     def get_soap_episode_id(episode_details):
         url = episode_details['file']
         return WebHandler.get_episode_id(url)
+
+    @staticmethod
+    def get_soap_season_id(episode_details):
+        url = episode_details['file']
+        return WebHandler.get_season_id(url)
 
 
 class SoapCache(object):
@@ -207,7 +213,11 @@ class SoapCache(object):
     def rm(self, cache_id):
         cache_id = filter(lambda c: c not in ",./", cache_id)
         filename = os.path.join(self.path, str(cache_id))
-        os.remove(filename)
+        try:
+            os.remove(filename)
+            return True
+        except OSError:
+            return False
 
     def rmall(self):
         shutil.rmtree(self.path)
@@ -330,7 +340,8 @@ class SoapHttpClient(SoapCookies):
             return text
 
     def clean(self, url):
-        self.cache.rm(url)
+        if self.cache.rm(url):
+            xbmc.log('%s: Url \'%s\' removed from cache' % (ADDONID, url))
 
     def clean_all(self):
         self.cache.rmall()
@@ -546,10 +557,12 @@ class SoapApi(object):
         result = self.client.request(self.PLAY_EPISODES_URL.format(eid=eid), data)
         return result['stream']
 
-    def mark_watched(self, eid, watched):
-        # TODO: clean cache for show
+    def mark_watched(self, sid, eid, watched):
         url = self.MARK_WATCHED if watched else self.MARK_UNWATCHED
         self.client.request(url.format(eid=eid), {'eid': eid})
+        # clean cache for show
+        url = self.EPISODES_URL.format(sid)
+        self.client.clean(url)
 
 
 class KodiApi(object):
@@ -689,6 +702,12 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         parsed_params = urlparse.urlparse(url)
         file_name = os.path.basename(parsed_params.path)
         return file_name.split('_')[1]
+
+    @staticmethod
+    def get_season_id(url):
+        parsed_params = urlparse.urlparse(url)
+        file_name = os.path.basename(parsed_params.path)
+        return file_name.split('_')[0]
 
     def out_folders(self, folders):
         self.out_elements(map(lambda f: "<tr>"
