@@ -12,5 +12,6 @@
 
         <setting label="Параметры" type="lsep" />
         <setting id="port" type="number" label="Порт веб-сервера" default="19088" />
+        <setting label="Стереть кеши" type="action" action="RunScript(service.xbmc.soap4me, clearcache)"/>
     </category>
 </settings>

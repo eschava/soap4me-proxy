@@ -4,6 +4,7 @@
 import xbmc, xbmcgui, xbmcplugin, xbmcaddon
 
 import os
+import sys
 import shutil
 import urllib
 import urllib2
@@ -206,6 +207,9 @@ class SoapCache(object):
 
     def set(self, cache_id, text):
         cache_id = filter(lambda c: c not in ",./", cache_id)
+        # if cache was removed
+        if not os.path.exists(self.path):
+            os.makedirs(self.path)
         filename = os.path.join(self.path, str(cache_id))
         with open(filename, "w") as f:
             f.write(text)
@@ -648,7 +652,7 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
     match = None
 
     def do_GET(self):
-        # Parse query data & params to find out what was passed
+        # Parse path to find out what was passed
         xbmc.log('%s: Serve \'%s\'' % (ADDONID, self.path))
         parsed_params = urlparse.urlparse(self.path)
         path = urllib.unquote(parsed_params.path)
@@ -691,7 +695,28 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
-            return
+
+    def do_HEAD(self):
+        # Parse path to find out what was passed
+        xbmc.log('%s: Head \'%s\'' % (ADDONID, self.path))
+        parsed_params = urlparse.urlparse(self.path)
+        path = urllib.unquote(parsed_params.path)
+
+        if path == '/':
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+        elif self.matches('^/(.*)/$', path):
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+        elif self.matches('^/(.*)/(\d+)_(\d+)_([0-9a-f]+)_S(\d+)E(\d+).avi$', path):
+            self.send_response(200)
+            self.send_header("Content-type", "video/mp4")
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def matches(self, regexp, s):
         self.match = re.match(regexp, s, re.M | re.I)
@@ -754,6 +779,21 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         return next(ifilter(lambda s: show == s['name'], shows), None)
 
 
+def clean_cache():
+    SoapCache(soappath, 5).rmall()
+    __addon__.setSetting('_token', '0')
+    __addon__.setSetting('_token_sid', '0')
+    __addon__.setSetting('_token_valid', '0')
+    __addon__.setSetting('_token_till', '0')
+    __addon__.setSetting('_token_check', '0')
+    __addon__.setSetting('_message_till_days', '0')
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == 'clearcache':
+        clean_cache()
+        message_ok('Done')
+        exit(0)
+
     xbmc.log('%s: Version %s started' % (ADDONID, ADDONVERSION))
     Main()
