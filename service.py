@@ -94,14 +94,14 @@ class KodiMonitor(xbmc.Monitor):
         if method == 'VideoLibrary.OnUpdate':
             params = json.loads(data)
             item_type = params['item']['type']
-            if item_type == 'episode' and 'playcount' in params:
+            if item_type == 'episode' and 'id' in params['item'] and 'playcount' in params:
                 item_id = params['item']['id']
                 playcount = params['playcount']
                 self.watched_status.update_server_status(item_id, playcount > 0)
         elif method == 'Player.OnStop':
             params = json.loads(data)
             item_type = params['item']['type']
-            if item_type == 'episode':
+            if item_type == 'episode' and 'id' in params['item']:
                 item_id = params['item']['id']
                 end = params['end']
                 if end:
