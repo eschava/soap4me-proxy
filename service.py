@@ -778,6 +778,25 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         shows = self.server.api.my_shows()  # should be cached
         return next(ifilter(lambda s: show == s['name'], shows), None)
 
+    # next methods were added to minimize number of messages printed to log
+    # because Kodi closes socket connection on error code
+    def handle_one_request(self):
+        try:
+            SimpleHTTPServer.SimpleHTTPRequestHandler.handle_one_request(self)
+        except IOError:
+            # xbmc.log('%s: I/O exception while handle_one_request()' % ADDONID)
+            pass  # it's OK
+
+    def finish(self):
+        try:
+            SimpleHTTPServer.SimpleHTTPRequestHandler.finish(self)  # super.finish()
+        except IOError:
+            # xbmc.log('%s: I/O exception while finish()' % ADDONID)
+            pass  # it's OK
+
+    def log_request(self, code='-', size='-'):
+        pass  # already logged
+
 
 def clean_cache():
     SoapCache(soappath, 5).rmall()
