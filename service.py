@@ -527,7 +527,7 @@ class SoapApi(object):
 
     def get_file_order(self, f):
         translate = int(f['translate']) - 1  # from 0
-        quality = int(f['quality']) - 1  # from 0
+        quality = int(f['quality']) - 4  # from 0
 
         translate_matrix = \
             [
