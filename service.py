@@ -513,6 +513,9 @@ class SoapApi(object):
         data = self.client.request(self.EPISODES_URL.format(sid), use_cache=True)
         data = data['episodes']
 
+        if data is None:
+            return []
+
         for e in data:
             self.watched_status.set_server_status(imdb, e['season'], e['episode'], e['watched'] == 1)
 
