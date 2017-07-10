@@ -57,11 +57,16 @@ class Main:
         watched_status.soap_api = api
         api.main()
 
-        httpd = SocketServer.TCPServer(("", KodiConfig.get_web_port()), WebHandler)
-        httpd.api = api
-        kodi_waiter = threading.Thread(target=self.kodi_waiter_thread, args=(httpd, watched_status,))
-        kodi_waiter.start()
-        httpd.serve_forever()
+        try:
+            httpd = SocketServer.TCPServer(("", KodiConfig.get_web_port()), WebHandler)
+            httpd.api = api
+            kodi_waiter = threading.Thread(target=self.kodi_waiter_thread, args=(httpd, watched_status,))
+            kodi_waiter.start()
+            httpd.serve_forever()
+        except:
+            message_error("Cannot create web-server, port is busy")
+            raise
+
 
     @staticmethod
     def kodi_waiter_thread(httpd, watched_status):
@@ -787,14 +792,12 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         try:
             SimpleHTTPServer.SimpleHTTPRequestHandler.handle_one_request(self)
         except IOError:
-            # xbmc.log('%s: I/O exception while handle_one_request()' % ADDONID)
             pass  # it's OK
 
     def finish(self):
         try:
             SimpleHTTPServer.SimpleHTTPRequestHandler.finish(self)  # super.finish()
         except IOError:
-            # xbmc.log('%s: I/O exception while finish()' % ADDONID)
             pass  # it's OK
 
     def log_request(self, code='-', size='-'):
