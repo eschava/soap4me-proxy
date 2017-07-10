@@ -16,6 +16,7 @@ import threading
 import time
 import hashlib
 from itertools import ifilter
+from traceback import format_exc
 
 import SimpleHTTPServer
 import SocketServer
@@ -65,7 +66,8 @@ class Main:
             httpd.serve_forever()
         except:
             message_error("Cannot create web-server, port is busy")
-            raise
+            xbmc.log('%s: %s' % (ADDONID, format_exc()), xbmc.LOGERROR)
+            #raise
 
 
     @staticmethod
