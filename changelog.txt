@@ -1,3 +1,6 @@
+v0.3.0
+- Synchronize episode position with server
+
 v0.2.1
 - Do not print garbage messages to log
 
