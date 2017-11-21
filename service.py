@@ -460,6 +460,10 @@ class KodiConfig(object):
     def get_web_port(cls):
         return to_int(__addon__.getSetting('port'))
 
+    @classmethod
+    def is_hide_watched_shows(cls):
+        return __addon__.getSetting('hide_watched_shows') == 'true'
+
 
 class SoapConfig(object):
     def __init__(self):
@@ -554,8 +558,10 @@ class SoapApi(object):
     def main(self):
         KodiConfig.message_till_days()
 
-    def my_shows(self):
+    def my_shows(self, hide_watched=False):
         data = self.client.request(self.MY_SHOWS_URL, use_cache=True)
+        if hide_watched:
+            data = filter(lambda row: row['unwatched'] > 0, data)
         # TODO: tvdb_id is used as IMDB because Kodi uses TVDB internally for imdbnumber key
         return map(lambda row: {'name': row['title'], 'id': row['sid'], 'IMDB': row['tvdb_id'].replace('tt', '')}, data)
 
@@ -730,7 +736,7 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
 
         if path == '/':
             xbmc.log('%s: Listing shows' % ADDONID)
-            shows = self.server.api.my_shows()
+            shows = self.server.api.my_shows(KodiConfig.is_hide_watched_shows())
 
             self.out_folders(map(lambda s: s['name'], shows))
         elif self.matches('^/(.*)/$', path):

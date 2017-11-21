@@ -1,3 +1,6 @@
+v0.3.1
+- Option hiding watched shows from the web-server listing
+
 v0.3.0
 - Synchronize episode position with server
 
