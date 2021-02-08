@@ -14,6 +14,7 @@ import json
 import gzip
 import threading
 import time
+import datetime
 import hashlib
 from itertools import ifilter
 from traceback import format_exc
@@ -561,9 +562,19 @@ class SoapApi(object):
     def my_shows(self, hide_watched=False):
         data = self.client.request(self.MY_SHOWS_URL, use_cache=True)
         if hide_watched:
-            data = filter(lambda row: row['unwatched'] > 0, data)
+            # here we can match shows from two sources only by name ('imdbnumber' from Kodi is trash)
+            active_shows = set(map(lambda row: row['label'], KodiApi.get_in_progress_shows()))
+            xbmc.log('%s: active_shows: %s' % (ADDONID, str(active_shows)))
+            data = filter(lambda row: row['unwatched'] > 0 or row['title'] in active_shows, data)
         # TODO: tvdb_id is used as IMDB because Kodi uses TVDB internally for imdbnumber key
-        return map(lambda row: {'name': row['title'], 'id': row['sid'], 'IMDB': row['tvdb_id'].replace('tt', '')}, data)
+        return map(lambda row: {
+            'name': row['title'],
+            'id': row['sid'],
+            'IMDB': row['tvdb_id'].replace('tt', ''),
+            'updated': row['updated'],
+            'total_episodes': row['total_episodes'],
+            'small_cover': row['covers']['small'] if 'covers' in row and 'small' in row['covers'] else None
+        }, data)
 
     def episodes(self, sid, imdb):
         data = self.client.request(self.EPISODES_URL.format(sid), use_cache=True)
@@ -641,6 +652,19 @@ class KodiApi(object):
         postdata = json.dumps({"jsonrpc": "2.0",
                                "id": 1,
                                'method': 'VideoLibrary.GetTVShows',
+                               "params": {
+                                   "properties": ["imdbnumber"]
+                               }})
+        json_query = xbmc.executeJSONRPC(postdata)
+        json_query = unicode(json_query, 'utf-8', errors='ignore')
+        json_query = json.loads(json_query)['result']['tvshows']
+        return json_query
+
+    @staticmethod
+    def get_in_progress_shows():
+        postdata = json.dumps({"jsonrpc": "2.0",
+                               "id": 1,
+                               'method': 'VideoLibrary.GetInProgressTVShows',
                                "params": {
                                    "properties": ["imdbnumber"]
                                }})
@@ -738,7 +762,7 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
             xbmc.log('%s: Listing shows' % ADDONID)
             shows = self.server.api.my_shows(KodiConfig.is_hide_watched_shows())
 
-            self.out_folders(map(lambda s: s['name'], shows))
+            self.out_folders(shows)
         elif self.matches('^/(.*)/$', path):
             show = self.match.group(1)
             show_details = self.find_show(show)
@@ -813,12 +837,18 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
 
     def out_folders(self, folders):
         self.out_elements(map(lambda f: "<tr>"
-                                        "  <td valign=\"top\"><img src=\"/icons/folder.gif\" alt=\"[DIR]\"></td>"
+                                        "  <td valign=\"top\"><img src=\"%s\" alt=\"[DIR]\"></td>"
                                         "  <td><a href=\"%s/\">%s</a></td>"
-                                        "  <td align=\"right\">2016-11-01 23:18</td>"
-                                        "  <td align=\"right\">  - </td>"
+                                        "  <td align=\"right\">%s</td>"
+                                        "  <td align=\"right\">%s</td>"
                                         "  <td>&nbsp;</td>"
-                                        "</tr>\n" % (urllib.quote(f), f), folders))
+                                        "</tr>\n" % (
+                                            f.get('small_cover', '/icons/folder.gif'),
+                                            urllib.quote(f['name']),
+                                            f['name'],
+                                            datetime.datetime.utcfromtimestamp(float(f['updated'])).strftime('%Y-%m-%d %H:%M') if f.get('updated', None) is not None else '-',
+                                            f.get('total_episodes', '-')
+                                        ), folders), True)
 
     def out_files(self, files):
         self.out_elements(map(lambda f: "<tr> "
@@ -827,9 +857,9 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
                                         "  <td align=\"right\">2016-11-01 23:08</td>"
                                         "  <td align=\"right\"> 0 </td>"
                                         "  <td>&nbsp;</td>"
-                                        "</tr>\n" % (f, f), files))
+                                        "</tr>\n" % (f, f), files), False)
 
-    def out_elements(self, elements):
+    def out_elements(self, elements, root):
         self.send_response(200)
         self.send_header('Content-Type', 'text/html;charset=UTF-8')
         self.end_headers()
@@ -843,7 +873,8 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         self.wfile.write("  <table>\n")
         self.wfile.write("   <tr><th valign=\"top\"><img src=\"/icons/blank.gif\" alt=\"[ICO]\"></th><th><a href=\"?C=N;O=D\">Name</a></th><th><a href=\"?C=M;O=A\">Last modified</a></th><th><a href=\"?C=S;O=A\">Size</a></th><th><a href=\"?C=D;O=A\">Description</a></th></tr>\n")
         self.wfile.write("   <tr><th colspan=\"5\"><hr></th></tr>\n")
-        self.wfile.write("   <tr><td valign=\"top\"><img src=\"/icons/back.gif\" alt=\"[PARENTDIR]\"></td><td><a href=\"/\">Parent Directory</a></td><td>&nbsp;</td><td align=\"right\">  - </td><td>&nbsp;</td></tr>\n")
+        if not root:
+            self.wfile.write("   <tr><td valign=\"top\"><img src=\"/icons/back.gif\" alt=\"[PARENTDIR]\"></td><td><a href=\"/\">Parent Directory</a></td><td>&nbsp;</td><td align=\"right\">  - </td><td>&nbsp;</td></tr>\n")
         for e in elements:
             self.wfile.write(e)
         self.wfile.write("   <tr><th colspan=\"5\"><hr></th></tr>\n")

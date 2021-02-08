@@ -1,3 +1,6 @@
+v0.3.2
+- Improvements for "Hide watched shows" option
+
 v0.3.1
 - Option hiding watched shows from the web-server listing
 
