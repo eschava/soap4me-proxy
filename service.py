@@ -1,27 +1,25 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-import xbmc, xbmcgui, xbmcplugin, xbmcaddon
+import xbmc, xbmcvfs, xbmcgui, xbmcplugin, xbmcaddon
 
 import os
 import sys
 import shutil
 import urllib
-import urllib2
-import cookielib
-import StringIO
+import urllib.request
+import urllib.parse
+import http.cookiejar
 import json
 import gzip
 import threading
 import time
 import datetime
 import hashlib
-from itertools import ifilter
 from traceback import format_exc
 
-import SimpleHTTPServer
-import SocketServer
-import urlparse
+import http.server
+import socketserver
 import re
 
 # produce web pages parseable by https://github.com/xbmc/xbmc/blob/master/xbmc/filesystem/HTTPDirectory.cpp
@@ -30,8 +28,8 @@ __addon__    = xbmcaddon.Addon()
 ADDONVERSION = __addon__.getAddonInfo('version')
 ADDONNAME    = __addon__.getAddonInfo('name')
 ADDONID      = __addon__.getAddonInfo('id')
-ADDONICON    = xbmc.translatePath(__addon__.getAddonInfo('icon'))
-ADDONPROFILE = xbmc.translatePath(__addon__.getAddonInfo('profile'))
+ADDONICON    = xbmcvfs.translatePath(__addon__.getAddonInfo('icon'))
+ADDONPROFILE = xbmcvfs.translatePath(__addon__.getAddonInfo('profile'))
 
 
 if getattr(xbmcgui.Dialog, 'notification', False):
@@ -60,7 +58,7 @@ class Main:
         api.main()
 
         try:
-            httpd = SocketServer.TCPServer(("", KodiConfig.get_web_port()), WebHandler)
+            httpd = socketserver.TCPServer(("", KodiConfig.get_web_port()), WebHandler)
             httpd.api = api
             kodi_waiter = threading.Thread(target=self.kodi_waiter_thread, args=(httpd, watched_status,))
             kodi_waiter.start()
@@ -236,6 +234,8 @@ class WatchedStatus(object):
 
 
 class SoapCache(object):
+    translation_table = dict.fromkeys(map(ord, ',./'), None)
+
     def __init__(self, path, lifetime=30):
         self.path = os.path.join(path, "cache")
         if not os.path.exists(self.path):
@@ -244,7 +244,7 @@ class SoapCache(object):
         self.lifetime = lifetime
 
     def get(self, cache_id, use_lifetime=True):
-        cache_id = filter(lambda c: c not in ",./", cache_id)
+        cache_id = cache_id.translate(self.translation_table)
         filename = os.path.join(self.path, str(cache_id))
         if not os.path.exists(filename) or not os.path.isfile(filename):
             return False
@@ -253,20 +253,20 @@ class SoapCache(object):
         if use_lifetime and self and os.path.getmtime(filename) <= max_time:
             return False
 
-        with open(filename, "r") as f:
+        with open(filename, mode="r", encoding="utf8") as f:
             return f.read()
 
     def set(self, cache_id, text):
-        cache_id = filter(lambda c: c not in ",./", cache_id)
+        cache_id = cache_id.translate(self.translation_table)
         # if cache was removed
         if not os.path.exists(self.path):
             os.makedirs(self.path)
         filename = os.path.join(self.path, str(cache_id))
-        with open(filename, "w") as f:
+        with open(filename, mode="w", encoding="utf8") as f:
             f.write(text)
 
     def rm(self, cache_id):
-        cache_id = filter(lambda c: c not in ",./", cache_id)
+        cache_id = cache_id.translate(self.translation_table)
         filename = os.path.join(self.path, str(cache_id))
         try:
             os.remove(filename)
@@ -281,7 +281,7 @@ class SoapCache(object):
 
 class SoapCookies(object):
     def __init__(self):
-        self.CJ = cookielib.CookieJar()
+        self.CJ = http.cookiejar.CookieJar()
         self._cookies = None
         self.path = soappath
 
@@ -289,9 +289,9 @@ class SoapCookies(object):
         if self.CJ is None:
             return
 
-        urllib2.install_opener(
-            urllib2.build_opener(
-                urllib2.HTTPCookieProcessor(self.CJ)
+        urllib.request.install_opener(
+            urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(self.CJ)
             )
         )
 
@@ -313,7 +313,7 @@ class SoapCookies(object):
                 cf.close()
                 # else: print '[%s]: NOT os.path.isfile(cookie_file=%s)' % (addon_id, cookie_file)
 
-        cookie_string = urllib.urlencode(cookie_send).replace('&', '; ')
+        cookie_string = urllib.parse.urlencode(cookie_send).replace('&', '; ')
         req.add_header('Cookie', cookie_string)
 
     def _cookies_save(self):
@@ -342,13 +342,13 @@ class SoapHttpClient(SoapCookies):
         if not isinstance(params, dict):
             return None
 
-        return urllib.urlencode(params)
+        return urllib.parse.urlencode(params).encode('utf-8')
 
     def _request(self, url, params=None):
         xbmc.log('{0}: REQUEST: {1} {2}'.format(ADDONID, url, params))
         self._cookies_init()
 
-        req = urllib2.Request(self.HOST + url)
+        req = urllib.request.Request(self.HOST + url)
         req.add_header('User-Agent', 'Kodi: plugin.soap4me-proxy v{0}'.format(ADDONVERSION))
         req.add_header('Accept-encoding', 'gzip')
         req.add_header('Kodi-Debug', '{0}'.format(xbmc.getInfoLabel('System.BuildVersion')))
@@ -361,18 +361,14 @@ class SoapHttpClient(SoapCookies):
         if params is not None:
             req.add_header('Content-Type', 'application/x-www-form-urlencoded')
 
-        response = urllib2.urlopen(req, post_data)
+        with urllib.request.urlopen(req, post_data) as response:
+            self._cookies_save()
 
-        self._cookies_save()
-
-        text = None
-        if response.info().get('Content-Encoding') == 'gzip':
-            buffer = StringIO.StringIO(response.read())
-            fstream = gzip.GzipFile(fileobj=buffer)
-            text = fstream.read()
-        else:
-            text = response.read()
-            response.close()
+            if response.info().get('Content-Encoding') == 'gzip':
+                fstream = gzip.GzipFile(fileobj=response)
+                text = fstream.read().decode('utf-8')
+            else:
+                text = response.read().decode('utf-8')
 
         return text
 
@@ -440,7 +436,7 @@ class KodiConfig(object):
             __addon__.setSetting('_message_till_days', str(int(time.time()) + 43200))
             till = to_int(__addon__.getSetting('_token_till'))
             if till != 0:
-                message_ok("Осталось {0} дней".format(int(till - time.time()) / 86400))
+                message_ok("Осталось {0} дней".format(int(round(till - time.time()) / 86400)))
 
     @classmethod
     def kodi_get_auth(cls):
@@ -617,12 +613,8 @@ class SoapApi(object):
 
     def get_episode_url(self, sid, eid, ehash):
         # TODO: warn if quality is bigger than configured
-        myhash = hashlib.md5(
-                    str(self.client.token) +
-                    str(eid) +
-                    str(sid) +
-                    str(ehash)
-                ).hexdigest()
+        string = str(self.client.token) + str(eid) + str(sid) + str(ehash)
+        myhash = hashlib.md5(string.encode('utf-8')).hexdigest()
 
         data = {
             "eid": eid,
@@ -656,7 +648,7 @@ class KodiApi(object):
                                    "properties": ["imdbnumber"]
                                }})
         json_query = xbmc.executeJSONRPC(postdata)
-        json_query = unicode(json_query, 'utf-8', errors='ignore')
+        # json_query = unicode(json_query, 'utf-8', errors='ignore')
         json_query = json.loads(json_query)['result']['tvshows']
         return json_query
 
@@ -669,7 +661,7 @@ class KodiApi(object):
                                    "properties": ["imdbnumber"]
                                }})
         json_query = xbmc.executeJSONRPC(postdata)
-        json_query = unicode(json_query, 'utf-8', errors='ignore')
+        # json_query = unicode(json_query, 'utf-8', errors='ignore')
         json_query = json.loads(json_query)['result']['tvshows']
         return json_query
 
@@ -683,7 +675,7 @@ class KodiApi(object):
                                    "properties": ["imdbnumber"]
                                }})
         json_query = xbmc.executeJSONRPC(postdata)
-        json_query = unicode(json_query, 'utf-8', errors='ignore')
+        # json_query = unicode(json_query, 'utf-8', errors='ignore')
         json_query = json.loads(json_query)['result']['tvshowdetails']
         return json_query
 
@@ -714,7 +706,7 @@ class KodiApi(object):
                                    "properties": ["season", "episode", "tvshowid", "playcount", "file", "resume"]
                                }})
         json_query = xbmc.executeJSONRPC(postdata)
-        json_query = unicode(json_query, 'utf-8', errors='ignore')
+        # json_query = unicode(json_query, 'utf-8', errors='ignore')
         json_query = json.loads(json_query)
         if 'error' in json_query:
             xbmc.log('%s: ERROR: %s' % (ADDONID, json_query['error']['stack']['message']))
@@ -749,14 +741,14 @@ class KodiApi(object):
 # issue with endless directory scanning by Kodi
 # so for folder is used only show name
 # and for file name custom prefix containing all required IDs is used
-class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
+class WebHandler(http.server.SimpleHTTPRequestHandler):
     match = None
 
     def do_GET(self):
         # Parse path to find out what was passed
         xbmc.log('%s: Serve \'%s\'' % (ADDONID, self.path))
-        parsed_params = urlparse.urlparse(self.path)
-        path = urllib.unquote(parsed_params.path)
+        parsed_params = urllib.parse.urlparse(self.path)
+        path = urllib.parse.unquote(parsed_params.path)
 
         if path == '/':
             xbmc.log('%s: Listing shows' % ADDONID)
@@ -800,8 +792,8 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
     def do_HEAD(self):
         # Parse path to find out what was passed
         xbmc.log('%s: Head \'%s\'' % (ADDONID, self.path))
-        parsed_params = urlparse.urlparse(self.path)
-        path = urllib.unquote(parsed_params.path)
+        parsed_params = urllib.parse.urlparse(self.path)
+        path = urllib.parse.unquote(parsed_params.path)
 
         if path == '/':
             self.send_response(200)
@@ -825,13 +817,13 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
 
     @staticmethod
     def get_episode_id(url):
-        parsed_params = urlparse.urlparse(url)
+        parsed_params = urllib.parse.urlparse(url)
         file_name = os.path.basename(parsed_params.path)
         return file_name.split('_')[1]
 
     @staticmethod
     def get_season_id(url):
-        parsed_params = urlparse.urlparse(url)
+        parsed_params = urllib.parse.urlparse(url)
         file_name = os.path.basename(parsed_params.path)
         return file_name.split('_')[0]
 
@@ -844,7 +836,7 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
                                         "  <td>&nbsp;</td>"
                                         "</tr>\n" % (
                                             f.get('small_cover', '/icons/folder.gif'),
-                                            urllib.quote(f['name']),
+                                            urllib.parse.quote(f['name']),
                                             f['name'],
                                             datetime.datetime.utcfromtimestamp(float(f['updated'])).strftime('%Y-%m-%d %H:%M') if f.get('updated', None) is not None else '-',
                                             f.get('total_episodes', '-')
@@ -864,39 +856,39 @@ class WebHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         self.send_header('Content-Type', 'text/html;charset=UTF-8')
         self.end_headers()
 
-        self.wfile.write("<html>\n")
-        self.wfile.write(" <head>\n")
-        self.wfile.write("  <title>Index of /</title>\n")
-        self.wfile.write(" </head>\n")
-        self.wfile.write(" <body>\n")
-        self.wfile.write("<h1>Index of /</h1>\n")
-        self.wfile.write("  <table>\n")
-        self.wfile.write("   <tr><th valign=\"top\"><img src=\"/icons/blank.gif\" alt=\"[ICO]\"></th><th><a href=\"?C=N;O=D\">Name</a></th><th><a href=\"?C=M;O=A\">Last modified</a></th><th><a href=\"?C=S;O=A\">Size</a></th><th><a href=\"?C=D;O=A\">Description</a></th></tr>\n")
-        self.wfile.write("   <tr><th colspan=\"5\"><hr></th></tr>\n")
+        self.wfile.write(b"<html>\n")
+        self.wfile.write(b" <head>\n")
+        self.wfile.write(b"  <title>Index of /</title>\n")
+        self.wfile.write(b" </head>\n")
+        self.wfile.write(b" <body>\n")
+        self.wfile.write(b"<h1>Index of /</h1>\n")
+        self.wfile.write(b"  <table>\n")
+        self.wfile.write(b"   <tr><th valign=\"top\"><img src=\"/icons/blank.gif\" alt=\"[ICO]\"></th><th><a href=\"?C=N;O=D\">Name</a></th><th><a href=\"?C=M;O=A\">Last modified</a></th><th><a href=\"?C=S;O=A\">Size</a></th><th><a href=\"?C=D;O=A\">Description</a></th></tr>\n")
+        self.wfile.write(b"   <tr><th colspan=\"5\"><hr></th></tr>\n")
         if not root:
-            self.wfile.write("   <tr><td valign=\"top\"><img src=\"/icons/back.gif\" alt=\"[PARENTDIR]\"></td><td><a href=\"/\">Parent Directory</a></td><td>&nbsp;</td><td align=\"right\">  - </td><td>&nbsp;</td></tr>\n")
+            self.wfile.write(b"   <tr><td valign=\"top\"><img src=\"/icons/back.gif\" alt=\"[PARENTDIR]\"></td><td><a href=\"/\">Parent Directory</a></td><td>&nbsp;</td><td align=\"right\">  - </td><td>&nbsp;</td></tr>\n")
         for e in elements:
-            self.wfile.write(e)
-        self.wfile.write("   <tr><th colspan=\"5\"><hr></th></tr>\n")
-        self.wfile.write("</table>\n")
-        self.wfile.write("</body></html>\n")
-        self.wfile.close()
+            self.wfile.write(e.encode())
+        self.wfile.write(b"   <tr><th colspan=\"5\"><hr></th></tr>\n")
+        self.wfile.write(b"</table>\n")
+        self.wfile.write(b"</body></html>\n")
+        # self.wfile.close()
 
     def find_show(self, show):
         shows = self.server.api.my_shows()  # should be cached
-        return next(ifilter(lambda s: show == s['name'], shows), None)
+        return next(filter(lambda s: show == s['name'], shows), None)
 
     # next methods were added to minimize number of messages printed to log
     # because Kodi closes socket connection on error code
     def handle_one_request(self):
         try:
-            SimpleHTTPServer.SimpleHTTPRequestHandler.handle_one_request(self)
+            http.server.SimpleHTTPRequestHandler.handle_one_request(self)
         except IOError:
             pass  # it's OK
 
     def finish(self):
         try:
-            SimpleHTTPServer.SimpleHTTPRequestHandler.finish(self)  # super.finish()
+            http.server.SimpleHTTPRequestHandler.finish(self)  # super.finish()
         except IOError:
             pass  # it's OK
 
